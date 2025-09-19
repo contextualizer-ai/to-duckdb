@@ -208,3 +208,7 @@ __marimo__/
 
 # MongoDB to DuckDB migration output
 output/
+
+# macOS
+.DS_Store
+**/.DS_Store
