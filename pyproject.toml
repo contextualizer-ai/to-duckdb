@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xlsx-loader"
+version = "0.1.0"
+description = "Load XLSX files into DuckDB"
+requires-python = ">=3.11"
+authors = [
+    {name = "MAM"},
+]
+dependencies = [
+    "typer",
+    "pandas",
+    "duckdb",
+    "openpyxl",
+]
+
+[project.scripts]
+xlsx-to-duckdb = "xlsx_loader.cli:app"
+
+[tool.uv]
+dev-dependencies = []
