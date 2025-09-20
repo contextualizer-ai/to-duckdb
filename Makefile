@@ -13,8 +13,9 @@ COLLECTION_PATTERN ?= $(COLLECTION_PREFIX)*
 
 # Output configuration
 OUTPUT_DIR ?= ./output
-DUCKDB_FILE ?= $(OUTPUT_DIR)/collections.duckdb
-XLSX_DUCKDB_FILE ?= $(OUTPUT_DIR)/xlsx.duckdb
+DATE_STAMP := $(shell date +%Y%m%d)
+DUCKDB_FILE ?= $(OUTPUT_DIR)/gold-api-$(DATE_STAMP).db
+XLSX_DUCKDB_FILE ?= $(OUTPUT_DIR)/gold-xlsx-$(DATE_STAMP).db
 
 # GOLD XLSX downloads
 GOLD_BASE_URL ?= https://gold.jgi.doe.gov:443/download
@@ -66,24 +67,39 @@ json-to-duckdb: $(OUTPUT_DIR)
 process-collection: export-collection-json json-to-duckdb
 
 # Show summary of tables in DuckDB
-show-summary:
+# Show summary of API database tables
+show-api-summary:
 	@if [ ! -f "$(DUCKDB_FILE)" ]; then \
-		echo "DuckDB file not found: $(DUCKDB_FILE)"; \
+		echo "API database file not found: $(DUCKDB_FILE)"; \
 		exit 1; \
 	fi
-	@echo "=== DuckDB Tables Summary ==="
+	@echo "=== API Database Summary ==="
 	@echo "Database: $(DUCKDB_FILE)"
 	@echo ""
-	@duckdb "$(DUCKDB_FILE)" -noheader -list -c "SELECT table_name || ': ' || (SELECT COUNT(*) FROM duckdb_tables() t2 WHERE t2.table_name = t1.table_name) || ' rows, ' || (SELECT COUNT(*) FROM pragma_table_info(t1.table_name)) || ' columns' FROM duckdb_tables() t1 ORDER BY table_name;" 2>/dev/null || \
-	for table in $$(duckdb "$(DUCKDB_FILE)" -noheader -list -c "SELECT table_name FROM duckdb_tables();" 2>/dev/null); do \
+	@for table in $$(duckdb "$(DUCKDB_FILE)" -noheader -list -c "SELECT table_name FROM duckdb_tables();" 2>/dev/null); do \
 		row_count=$$(duckdb "$(DUCKDB_FILE)" -noheader -list -c "SELECT COUNT(*) FROM $$table;" 2>/dev/null); \
 		col_count=$$(duckdb "$(DUCKDB_FILE)" -noheader -list -c "SELECT COUNT(*) FROM pragma_table_info('$$table');" 2>/dev/null); \
 		echo "$$table: $$row_count rows, $$col_count columns"; \
 	done
 
-# Process all collections matching the pattern
-dump-all: $(OUTPUT_DIR)
-	@echo "Dumping all collections matching '$(COLLECTION_PATTERN)' from '$(MONGO_DB)'..."
+# Show summary of XLSX database tables
+show-xlsx-summary:
+	@if [ ! -f "$(XLSX_DUCKDB_FILE)" ]; then \
+		echo "XLSX database file not found: $(XLSX_DUCKDB_FILE)"; \
+		exit 1; \
+	fi
+	@echo "=== XLSX Database Summary ==="
+	@echo "Database: $(XLSX_DUCKDB_FILE)"
+	@echo ""
+	@for table in $$(duckdb "$(XLSX_DUCKDB_FILE)" -noheader -list -c "SELECT table_name FROM duckdb_tables();" 2>/dev/null); do \
+		row_count=$$(duckdb "$(XLSX_DUCKDB_FILE)" -noheader -list -c "SELECT COUNT(*) FROM $$table;" 2>/dev/null); \
+		col_count=$$(duckdb "$(XLSX_DUCKDB_FILE)" -noheader -list -c "SELECT COUNT(*) FROM pragma_table_info('$$table');" 2>/dev/null); \
+		echo "$$table: $$row_count rows, $$col_count columns"; \
+	done
+
+# Dump all collections to JSON only
+dump-json: $(OUTPUT_DIR)
+	@echo "Dumping all collections matching '$(COLLECTION_PATTERN)' to JSON..."
 	@collections=$$($(MAKE) get-collections 2>/dev/null); \
 	if [ -z "$$collections" ]; then \
 		echo "No collections found matching pattern '$(COLLECTION_PATTERN)'"; \
@@ -91,16 +107,108 @@ dump-all: $(OUTPUT_DIR)
 	fi; \
 	echo "Found collections: $$collections"; \
 	for collection in $$collections; do \
-		echo "Processing collection: $$collection"; \
-		$(MAKE) process-collection COLLECTION=$$collection; \
+		echo "Exporting collection: $$collection"; \
+		$(MAKE) export-collection-json COLLECTION=$$collection; \
 	done
-	@echo "All collections processed successfully!"
-	@echo ""
-	$(MAKE) show-summary
+	@echo "All collections exported to JSON!"
 
-# Clean up generated files
-clean:
-	rm -rf $(OUTPUT_DIR)
+# Create API database from existing JSON files
+make-api-db: $(OUTPUT_DIR)
+	@echo "Creating API database from JSON files..."
+	@json_files=$$(ls $(OUTPUT_DIR)/*.json 2>/dev/null || true); \
+	if [ -z "$$json_files" ]; then \
+		echo "No JSON files found. Run 'make dump-json' first."; \
+		exit 1; \
+	fi; \
+	for json_file in $$json_files; do \
+		collection=$$(basename $$json_file .json); \
+		echo "Loading $$collection into DuckDB..."; \
+		$(MAKE) json-to-duckdb COLLECTION=$$collection; \
+	done
+	@echo "API database created successfully!"
+	@echo ""
+	@for table in $$(duckdb "$(DUCKDB_FILE)" -noheader -list -c "SELECT table_name FROM duckdb_tables();" 2>/dev/null); do \
+		row_count=$$(duckdb "$(DUCKDB_FILE)" -noheader -list -c "SELECT COUNT(*) FROM $$table;" 2>/dev/null); \
+		col_count=$$(duckdb "$(DUCKDB_FILE)" -noheader -list -c "SELECT COUNT(*) FROM pragma_table_info('$$table');" 2>/dev/null); \
+		echo "$$table: $$row_count rows, $$col_count columns"; \
+	done
+
+# Download XLSX files only
+download-xlsx-files: $(OUTPUT_DIR)
+	@echo "Downloading all GOLD XLSX files..."
+	@for mode in $(XLSX_FILES); do \
+		echo "Downloading $$mode..."; \
+		timestamp=$$(date +%Y%m%d_%H%M%S); \
+		curl -L -o "$(OUTPUT_DIR)/gold_$${mode}_$$timestamp.xlsx" "$(GOLD_BASE_URL)?mode=$$mode"; \
+		echo "Downloaded: $(OUTPUT_DIR)/gold_$${mode}_$$timestamp.xlsx"; \
+		sleep 1; \
+	done
+	@echo "All XLSX files downloaded successfully!"
+
+# Create XLSX database from existing XLSX files
+make-xlsx-db: install-deps $(OUTPUT_DIR)
+	@echo "Loading all XLSX files from $(OUTPUT_DIR) into separate DuckDB..."
+	uv run xlsx-to-duckdb load-all-xlsx --input-dir "$(OUTPUT_DIR)" --duckdb-file "$(XLSX_DUCKDB_FILE)" --verbose
+
+# Process all collections matching the pattern (JSON + DuckDB)
+make-api-database: $(OUTPUT_DIR)
+	@echo "Dumping all collections matching '$(COLLECTION_PATTERN)' to JSON..."
+	@collections=$$(mongosh --quiet --eval "db.runCommand('listCollections').cursor.firstBatch.filter(c => c.name.startsWith('$(COLLECTION_PREFIX)')).map(c => c.name).join(' ')" $(MONGO_URI) 2>/dev/null); \
+	if [ -z "$$collections" ]; then \
+		echo "No collections found matching pattern '$(COLLECTION_PATTERN)'"; \
+		exit 1; \
+	fi; \
+	echo "Found collections: $$collections"; \
+	for collection in $$collections; do \
+		echo "Exporting collection: $$collection"; \
+		mongoexport --uri="$(MONGO_URI)" --collection="$$collection" --type=json --out="$(OUTPUT_DIR)/$$collection.json"; \
+	done
+	@echo "All collections exported to JSON!"
+	@echo "Creating API database from JSON files..."
+	@json_files=$$(ls $(OUTPUT_DIR)/*.json 2>/dev/null || true); \
+	for json_file in $$json_files; do \
+		collection=$$(basename $$json_file .json); \
+		echo "Loading $$collection into DuckDB..."; \
+		table_name=$$(echo "$$collection" | sed 's/\./_/g'); \
+		duckdb "$(DUCKDB_FILE)" -c "CREATE OR REPLACE TABLE $$table_name AS SELECT * FROM read_json_auto('$$json_file', sample_size=-1);"; \
+	done
+	@echo "API database created successfully!"
+	@echo ""
+	@for table in $$(duckdb "$(DUCKDB_FILE)" -noheader -list -c "SELECT table_name FROM duckdb_tables();" 2>/dev/null); do \
+		row_count=$$(duckdb "$(DUCKDB_FILE)" -noheader -list -c "SELECT COUNT(*) FROM $$table;" 2>/dev/null); \
+		col_count=$$(duckdb "$(DUCKDB_FILE)" -noheader -list -c "SELECT COUNT(*) FROM pragma_table_info('$$table');" 2>/dev/null); \
+		echo "$$table: $$row_count rows, $$col_count columns"; \
+	done
+
+# Clean up JSON dumps from MongoDB
+clean-json:
+	@echo "Removing MongoDB JSON dumps..."
+	rm -f $(OUTPUT_DIR)/*.json
+	@echo "JSON dumps removed."
+
+# Clean up MongoDB DuckDB database
+clean-api-db:
+	@echo "Removing MongoDB API database..."
+	rm -f $(OUTPUT_DIR)/gold-api-*.db
+	@echo "API database removed."
+
+# Clean up XLSX downloads
+clean-xlsx:
+	@echo "Removing XLSX downloads..."
+	rm -f $(OUTPUT_DIR)/*.xlsx
+	@echo "XLSX downloads removed."
+
+# Clean up XLSX DuckDB database
+clean-xlsx-db:
+	@echo "Removing XLSX database..."
+	rm -f $(OUTPUT_DIR)/gold-xlsx-*.db
+	@echo "XLSX database removed."
+
+# Clean up all generated files
+clean: clean-json clean-api-db clean-xlsx clean-xlsx-db
+	@echo "Removing output directory if empty..."
+	@rmdir $(OUTPUT_DIR) 2>/dev/null || true
+	@echo "Cleanup complete."
 
 # Download single XLSX file
 download-xlsx: $(OUTPUT_DIR)
@@ -169,4 +277,4 @@ show-config:
 	@echo "  GOLD_BASE_URL: $(GOLD_BASE_URL)"
 	@echo "  XLSX_FILES: $(XLSX_FILES)"
 
-.PHONY: list-collections get-collections export-collection-json json-to-duckdb process-collection dump-all clean show-config show-summary download-xlsx download-all-xlsx install-deps load-xlsx load-all-xlsx download-and-load-xlsx
+.PHONY: list-collections get-collections export-collection-json json-to-duckdb process-collection dump-json make-api-db download-xlsx-files make-xlsx-db make-api-database clean clean-json clean-api-db clean-xlsx clean-xlsx-db show-config show-api-summary show-xlsx-summary download-xlsx download-all-xlsx install-deps load-xlsx load-all-xlsx download-and-load-xlsx
