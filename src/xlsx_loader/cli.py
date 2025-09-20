@@ -146,8 +146,12 @@ def load_all_xlsx(
     typer.echo(f"Found {len(xlsx_files)} XLSX files to process")
     
     for xlsx_file in xlsx_files:
-        # Use filename (without extension) as table prefix
-        table_prefix = xlsx_file.stem.replace(" ", "_").replace("-", "_")
+        # Use filename (without extension and timestamp) as table prefix
+        filename = xlsx_file.stem
+        # Remove timestamp pattern like _20250919_085132 from filename
+        import re
+        filename = re.sub(r'_\d{8}_\d{6}', '', filename)
+        table_prefix = filename.replace(" ", "_").replace("-", "_")
         
         typer.echo(f"\n--- Processing: {xlsx_file.name} ---")
         
